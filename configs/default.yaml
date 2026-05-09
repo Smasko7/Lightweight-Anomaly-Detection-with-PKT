@@ -1,0 +1,18 @@
+# Model
+teacher_latent_dim: 64
+kitsune_alpha: 0.5
+
+# Training
+epochs: 50
+batch_size: 256
+learning_rate: 0.001
+early_stopping_patience: 10
+
+# Evaluation
+seeds: [42, 123, 456]
+datasets: [optdigits, speech, mnist, landsat, backdoor]
+
+# Paths
+data_dir: data/raw
+checkpoint_dir: checkpoints
+results_dir: results

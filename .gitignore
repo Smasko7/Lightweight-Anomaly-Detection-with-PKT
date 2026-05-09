@@ -1,0 +1,32 @@
+# Claude Code session data
+.claude/
+
+# Internal research notes
+RESEARCH_STATE.md
+
+# Model checkpoints (large binary files)
+checkpoints/
+
+# Raw datasets — re-downloadable via scripts/download_data.py
+data/raw/
+
+# Experiment outputs — reproducible via scripts/run_all.sh
+# Remove this line if you want results tracked (e.g. for sharing with collaborators)
+results/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# Environment
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
