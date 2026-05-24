@@ -48,22 +48,34 @@ def _compute_pkt_term(pkt_fn, teacher, teacher_type, pkt_mode, x, hiddens, recon
     """Compute scaled PKT loss for any mode. Teacher forward runs under no_grad."""
     x_in = x.unsqueeze(1) if teacher_type == 'cnn' else x
 
-    with torch.no_grad():
-        if pkt_mode in ('concat', 'per_subae'):
-            _, teacher_latent = teacher(x_in)
-            teacher_latent = teacher_latent.detach()
+    if teacher_type == 'bigkit':
+        with torch.no_grad():
+            t_hiddens = teacher.encode_per_subae(x_in)
+            t_concat  = torch.cat(t_hiddens, dim=1).detach()
+            t_hiddens = [h.detach() for h in t_hiddens]
+        if pkt_mode == 'concat':
+            pkt_raw = pkt_fn(t_concat, torch.cat(hiddens, dim=1))
+        elif pkt_mode == 'per_subae':
+            pkt_raw = sum(pkt_fn(t_concat, h) for h in hiddens)
+        else:  # subae_paired
+            pkt_raw = sum(pkt_fn(t_h, s_h) for t_h, s_h in zip(t_hiddens, hiddens))
+    else:
+        with torch.no_grad():
+            if pkt_mode in ('concat', 'per_subae'):
+                _, teacher_latent = teacher(x_in)
+                teacher_latent = teacher_latent.detach()
+            else:  # token
+                token_latents = teacher.encode_tokens(x_in).detach()  # (B, K, d_model)
+
+        if pkt_mode == 'concat':
+            pseudo_latent = torch.cat(hiddens, dim=1)
+            pkt_raw = pkt_fn(teacher_latent, pseudo_latent)
+
+        elif pkt_mode == 'per_subae':
+            pkt_raw = sum(pkt_fn(teacher_latent, h) for h in hiddens)
+
         else:  # token
-            token_latents = teacher.encode_tokens(x_in).detach()  # (B, K, d_model)
-
-    if pkt_mode == 'concat':
-        pseudo_latent = torch.cat(hiddens, dim=1)
-        pkt_raw = pkt_fn(teacher_latent, pseudo_latent)
-
-    elif pkt_mode == 'per_subae':
-        pkt_raw = sum(pkt_fn(teacher_latent, h) for h in hiddens)
-
-    else:  # token
-        pkt_raw = sum(pkt_fn(token_latents[:, i, :], h) for i, h in enumerate(hiddens))
+            pkt_raw = sum(pkt_fn(token_latents[:, i, :], h) for i, h in enumerate(hiddens))
 
     pkt_scale = recon_loss.detach() / (pkt_raw.detach() + 1e-8)
     return alpha * pkt_scale * pkt_raw
@@ -251,17 +263,26 @@ def train_kitsune(
     return history
 
 
-def _load_teacher(model_name: str, cfg: dict, dataset: str, seed: int, device: torch.device):
+def _load_teacher(model_name: str, cfg: dict, dataset: str, seed: int,
+                  device: torch.device, teacher_hidden_ratio: float = 0.75,
+                  teacher_mixer: str = 'none'):
     n, kg = cfg['n_features'], cfg['k_groups']
-    ckpt  = f"checkpoints/{dataset}_{model_name}_seed{seed}.pt"
-    if model_name == 'vanilla':
-        model = VanillaAutoencoder(n_features=n)
-    elif model_name == 'cnn':
-        model = ConvAutoencoder(n_features=n)
-    elif model_name == 'vae':
-        model = VAETeacher(n_features=n)
+    if model_name == 'bigkit':
+        r          = teacher_hidden_ratio
+        mixer_type = None if teacher_mixer == 'none' else teacher_mixer
+        mix_tag    = '_mix' if teacher_mixer != 'none' else ''
+        ckpt = f"checkpoints/{dataset}_bigkit{mix_tag}_r{int(r)}_seed{seed}.pt"
+        model = KitsunePyTorch(n_features=n, k_groups=kg, hidden_ratio=r, mixer_type=mixer_type)
     else:
-        model = TransformerAutoencoder(n_features=n, k_groups=kg)
+        ckpt = f"checkpoints/{dataset}_{model_name}_seed{seed}.pt"
+        if model_name == 'vanilla':
+            model = VanillaAutoencoder(n_features=n)
+        elif model_name == 'cnn':
+            model = ConvAutoencoder(n_features=n)
+        elif model_name == 'vae':
+            model = VAETeacher(n_features=n)
+        else:
+            model = TransformerAutoencoder(n_features=n, k_groups=kg)
     ckpt_data = torch.load(ckpt, map_location=device)
     state = ckpt_data.get('state_dict', ckpt_data) if isinstance(ckpt_data, dict) else ckpt_data
     model.load_state_dict(state)
@@ -271,12 +292,17 @@ def _load_teacher(model_name: str, cfg: dict, dataset: str, seed: int, device: t
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', required=True, choices=['optdigits', 'speech', 'mnist', 'landsat', 'backdoor'])
+    parser.add_argument('--dataset', required=True, choices=['optdigits', 'mnist', 'landsat', 'backdoor'])
     parser.add_argument('--mode',    required=True, choices=['vanilla', 'pkt'])
-    parser.add_argument('--teacher', choices=['vanilla', 'cnn', 'transformer', 'vae'], default=None)
-    parser.add_argument('--pkt_mode', choices=['concat', 'per_subae', 'token'], default='concat',
+    parser.add_argument('--teacher', choices=['vanilla', 'cnn', 'transformer', 'vae', 'bigkit'], default=None)
+    parser.add_argument('--pkt_mode', choices=['concat', 'per_subae', 'token', 'subae_paired'], default='concat',
                         help='concat: global→concat | per_subae: global→each sub-AE | '
-                             'token: transformer token i → sub-AE i (requires --teacher transformer)')
+                             'token: transformer token i → sub-AE i (requires --teacher transformer) | '
+                             'subae_paired: teacher.sub_ae[i] → student.sub_ae[i] (requires --teacher bigkit)')
+    parser.add_argument('--teacher_hidden_ratio', type=float, default=0.75,
+                        help='Hidden ratio for bigkit teacher (required when --teacher bigkit)')
+    parser.add_argument('--teacher_mixer', choices=['none', 'mlp'], default='none',
+                        help='Mixer type used when the bigkit teacher was trained (default none)')
     parser.add_argument('--seed',         type=int,   default=42)
     parser.add_argument('--epochs',       type=int,   default=50)
     parser.add_argument('--phase2_epochs',type=int,   default=25,
@@ -293,6 +319,8 @@ def main():
         parser.error('--teacher required when --mode pkt')
     if args.pkt_mode == 'token' and args.teacher != 'transformer':
         parser.error('--pkt_mode token requires --teacher transformer')
+    if args.pkt_mode == 'subae_paired' and args.teacher != 'bigkit':
+        parser.error('--pkt_mode subae_paired requires --teacher bigkit')
 
     set_seed(args.seed)
     device = get_device()
@@ -303,11 +331,17 @@ def main():
 
     teacher = None
     if args.mode == 'pkt':
-        teacher = _load_teacher(args.teacher, cfg, args.dataset, args.seed, device)
+        teacher = _load_teacher(args.teacher, cfg, args.dataset, args.seed, device,
+                                teacher_hidden_ratio=args.teacher_hidden_ratio,
+                                teacher_mixer=args.teacher_mixer)
 
     label = f"{args.dataset}_kitsune_{args.mode}"
     if args.teacher:
         label += f"_{args.teacher}"
+        if args.teacher == 'bigkit':
+            if args.teacher_mixer != 'none':
+                label += "_mix"
+            label += f"_r{int(args.teacher_hidden_ratio)}"
     if args.pkt_mode != 'concat':
         label += f"_{args.pkt_mode}"
     label += f"_seed{args.seed}"

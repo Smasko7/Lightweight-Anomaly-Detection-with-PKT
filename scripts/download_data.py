@@ -6,7 +6,6 @@ from pathlib import Path
 BASE_URL = "https://raw.githubusercontent.com/Minqi824/ADBench/main/adbench/datasets/Classical"
 FILES = [
     "26_optdigits.npz",
-    "36_speech.npz",
     "24_mnist.npz",
     "19_landsat.npz",
     "3_backdoor.npz",

@@ -10,7 +10,7 @@ early_stopping_patience: 10
 
 # Evaluation
 seeds: [42, 123, 456]
-datasets: [optdigits, speech, mnist, landsat, backdoor]
+datasets: [optdigits, mnist, landsat, backdoor]
 
 # Paths
 data_dir: data/raw

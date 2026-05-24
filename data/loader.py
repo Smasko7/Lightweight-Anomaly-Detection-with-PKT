@@ -15,12 +15,6 @@ DATASET_CONFIGS = {
         'k_groups': 8,
         'features_per_group': 8,
     },
-    'speech': {
-        'file': '36_speech.npz',
-        'n_features': 400,
-        'k_groups': 20,
-        'features_per_group': 20,
-    },
     'mnist': {
         'file': '24_mnist.npz',
         'n_features': 100,

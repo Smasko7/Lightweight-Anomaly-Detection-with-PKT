@@ -5,7 +5,7 @@
 # Set ALPHA to the value from the sweep where V2 > K0 without exceeding V1:
 ALPHA=0.1    # from alpha sweep: best trade-off on optdigits/seed42
 
-DATASETS="optdigits speech mnist"
+DATASETS="optdigits mnist landsat backdoor"
 SEEDS="42 123 456"
 
 set -e

@@ -10,6 +10,9 @@ checkpoints/
 # Raw datasets — re-downloadable via scripts/download_data.py
 data/raw/
 
+# Explainatory docs
+docs/transformer_walkthrough.md
+
 # Experiment outputs — reproducible via scripts/run_all.sh
 # Remove this line if you want results tracked (e.g. for sharing with collaborators)
 results/

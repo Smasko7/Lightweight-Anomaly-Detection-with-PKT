@@ -11,7 +11,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score, precision_re
 def evaluate(
     model: nn.Module,
     test_loader: DataLoader,
-    model_type: str = 'kitsune',  # 'kitsune' | 'vanilla' | 'cnn' | 'transformer'
+    model_type: str = 'kitsune',  # 'kitsune' | 'bigkit' | 'vanilla' | 'cnn' | 'transformer' | 'vae'
     phi: Optional[float] = None,  # paper III-E threshold: alert if score >= phi
 ) -> dict:
     device = next(model.parameters()).device
@@ -28,6 +28,9 @@ def evaluate(
             t0 = time.perf_counter()
             if model_type == 'kitsune':
                 scores = model.get_anomaly_score(x)
+            elif model_type == 'bigkit':
+                # Standalone bigkit teacher: output AE is untrained → direct RMSE sum
+                scores = model.direct_rmse_sum(x)
             elif model_type == 'cnn':
                 recon, _ = model(x.unsqueeze(1))
                 scores = torch.mean((x - recon.squeeze(1)) ** 2, dim=1)

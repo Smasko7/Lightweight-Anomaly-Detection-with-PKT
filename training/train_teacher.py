@@ -14,6 +14,7 @@ from models.vanilla_ae import VanillaAutoencoder
 from models.conv_ae import ConvAutoencoder
 from models.transformer_ae import TransformerAutoencoder
 from models.vae import VAETeacher
+from models.kitsune import KitsunePyTorch
 from evaluation.metrics import evaluate
 from training.utils import set_seed, get_device
 
@@ -26,6 +27,12 @@ def _elbo(recon: torch.Tensor, x: torch.Tensor,
     recon_loss = nn.functional.mse_loss(recon, x)
     kl = -0.5 * torch.mean(torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1))
     return recon_loss + beta * kl
+
+
+def _bigkit_loss(model: KitsunePyTorch, x: torch.Tensor) -> torch.Tensor:
+    """Sum of per-group MSE across all sub-AEs. Output AE is not involved."""
+    groups = x.split(model.fpg, dim=1)
+    return sum(nn.functional.mse_loss(ae(g)[0], g) for g, ae in zip(groups, model.sub_aes))
 
 
 def train_teacher(
@@ -41,7 +48,9 @@ def train_teacher(
 ) -> dict:
     device    = get_device()
     model     = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # bigkit teacher trains only its sub-AEs; output AE stays at init and is unused.
+    params    = model.sub_aes.parameters() if model_type == 'bigkit' else model.parameters()
+    optimizer = torch.optim.Adam(params, lr=lr)
     mse       = nn.MSELoss()
 
     os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
@@ -59,6 +68,8 @@ def train_teacher(
             elif model_type == 'vae':
                 recon, mu, log_var = model.forward_with_kl(x)
                 loss = _elbo(recon, x, mu, log_var, beta)
+            elif model_type == 'bigkit':
+                loss = _bigkit_loss(model, x)
             else:
                 recon, _ = model(x)
                 loss = mse(recon, x)
@@ -79,6 +90,8 @@ def train_teacher(
                 elif model_type == 'vae':
                     recon, mu, log_var = model.forward_with_kl(x)
                     loss = _elbo(recon, x, mu, log_var, beta)
+                elif model_type == 'bigkit':
+                    loss = _bigkit_loss(model, x)
                 else:
                     recon, _ = model(x)
                     loss = mse(recon, x)
@@ -116,6 +129,8 @@ def train_teacher(
                 _, log_var = model.encode(x)
                 kl = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1)
                 scores = torch.mean((x - recon) ** 2, dim=1) + kl
+            elif model_type == 'bigkit':
+                scores = model.direct_rmse_sum(x)
             else:
                 recon, _ = model(x)
                 scores = torch.mean((x - recon) ** 2, dim=1)
@@ -128,10 +143,14 @@ def train_teacher(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', required=True, choices=['optdigits', 'speech', 'mnist', 'landsat', 'backdoor'])
-    parser.add_argument('--model',   required=True, choices=['vanilla', 'cnn', 'transformer', 'vae'])
+    parser.add_argument('--dataset', required=True, choices=['optdigits', 'mnist', 'landsat', 'backdoor'])
+    parser.add_argument('--model',   required=True, choices=['vanilla', 'cnn', 'transformer', 'vae', 'bigkit'])
     parser.add_argument('--beta',    type=float, default=1.0,
                         help='KL weight for VAE ELBO loss (default 1.0)')
+    parser.add_argument('--hidden_ratio', type=float, default=4.0,
+                        help='Sub-AE hidden ratio for bigkit teacher (ignored for other models)')
+    parser.add_argument('--mixer', choices=['none', 'mlp'], default='none',
+                        help='Cross-group mixer for bigkit teacher (default none; "mlp" adds a residual MLP mixer)')
     parser.add_argument('--seed',    type=int, default=42)
     parser.add_argument('--epochs',  type=int, default=50)
     parser.add_argument('--lr',      type=float, default=1e-3)
@@ -151,11 +170,25 @@ def main():
         model = ConvAutoencoder(n_features=n)
     elif args.model == 'vae':
         model = VAETeacher(n_features=n)
+    elif args.model == 'bigkit':
+        mixer_type = None if args.mixer == 'none' else args.mixer
+        model = KitsunePyTorch(n_features=n, k_groups=kg,
+                               hidden_ratio=args.hidden_ratio, mixer_type=mixer_type)
     else:
         model = TransformerAutoencoder(n_features=n, k_groups=kg)
 
-    save_path = f"checkpoints/{args.dataset}_{args.model}_seed{args.seed}.pt"
-    tag = f" (beta={args.beta})" if args.model == 'vae' else ""
+    if args.model == 'bigkit':
+        mix_tag  = '_mix' if args.mixer != 'none' else ''
+        model_id = f"bigkit{mix_tag}_r{int(args.hidden_ratio)}"
+    else:
+        model_id = args.model
+    save_path = f"checkpoints/{args.dataset}_{model_id}_seed{args.seed}.pt"
+    if args.model == 'vae':
+        tag = f" (beta={args.beta})"
+    elif args.model == 'bigkit':
+        tag = f" (hidden_ratio={args.hidden_ratio}, mixer={args.mixer})"
+    else:
+        tag = ""
     print(f"Training {args.model} teacher{tag} on {args.dataset} (seed={args.seed})")
     history = train_teacher(model, train_loader, val_loader,
                             epochs=args.epochs, lr=args.lr,
@@ -168,13 +201,13 @@ def main():
 
     print(f"Evaluating on test set...")
     metrics = evaluate(model, test_loader, model_type=args.model, phi=phi)
-    metrics.update({'dataset': args.dataset, 'model': args.model, 'seed': args.seed})
+    metrics.update({'dataset': args.dataset, 'model': model_id, 'seed': args.seed})
     print(f"  AUC-ROC={metrics['auc_roc']:.4f} | AUC-PR={metrics['auc_pr']:.4f} | "
           f"F1_oracle={metrics['f1_oracle']:.4f} | F1_phi={metrics['f1_phi']:.4f} | "
           f"phi={phi:.5f} | params={metrics['params']}")
 
     Path('results').mkdir(exist_ok=True)
-    out = f"results/{args.dataset}_{args.model}_seed{args.seed}.json"
+    out = f"results/{args.dataset}_{model_id}_seed{args.seed}.json"
     with open(out, 'w') as f:
         json.dump(metrics, f, indent=2)
     print(f"  Saved to {out}")
